@@ -1,92 +1,68 @@
-import streamlit as st
 import requests
+import streamlit as st
 
 BASE_URL = "https://api.gbif.org/v1"
-ROOT_KINGDOMS = ["Animalia", "Plantae", "Fungi"]
 
-RANK_HIERARCHY = [
-    "kingdom",
-    "phylum",
-    "class",
-    "order",
-    "family",
-    "genus",
-    "species"
-]
+MAX_DEPTH = 5  # Limit depth to avoid huge recursion; adjust as needed
+MAX_CHILDREN = 200  # Limit children per node
 
 @st.cache_data(show_spinner=False)
-def get_taxon_key(name, rank="kingdom"):
-    url = f"{BASE_URL}/species/match"
-    params = {"name": name, "rank": rank.upper()}
+def get_children(taxon_key, limit=100, offset=0):
+    url = f"{BASE_URL}/species/{taxon_key}/children"
+    params = {"limit": limit, "offset": offset}
     r = requests.get(url, params=params)
     if r.ok:
-        return r.json().get("usageKey")
-    return None
+        return r.json().get("results", [])
+    return []
 
-@st.cache_data(show_spinner=False)
-def get_children(taxon_key, max_children=200):
-    children = []
-    limit = 100
+def fetch_all_children(taxon_key):
+    all_children = []
     offset = 0
-
+    limit = 100
     while True:
-        url = f"{BASE_URL}/species/{taxon_key}/children"
-        params = {"limit": limit, "offset": offset}
-        r = requests.get(url, params=params)
-        if not r.ok:
-            break
-        batch = r.json().get("results", [])
+        batch = get_children(taxon_key, limit=limit, offset=offset)
         if not batch:
             break
-        children.extend(batch)
-        if len(children) >= max_children:
+        all_children.extend(batch)
+        if len(all_children) >= MAX_CHILDREN:
             break
         offset += limit
+    return all_children[:MAX_CHILDREN]
 
-    return children[:max_children]
+def build_tree(taxon_key, name, depth=0):
+    if depth > MAX_DEPTH:
+        return {"name": name, "key": taxon_key, "children": []}
 
-def get_next_rank(current_rank):
-    try:
-        idx = RANK_HIERARCHY.index(current_rank.lower())
-        return RANK_HIERARCHY[idx + 1] if idx + 1 < len(RANK_HIERARCHY) else None
-    except ValueError:
-        return None
+    children = fetch_all_children(taxon_key)
+    tree_children = []
+    for child in children:
+        child_name = child.get("canonicalName") or child.get("scientificName") or "Unknown"
+        child_key = child["key"]
+        subtree = build_tree(child_key, child_name, depth + 1)
+        tree_children.append(subtree)
 
-def get_rank_index(rank):
-    try:
-        return RANK_HIERARCHY.index(rank.lower())
-    except ValueError:
-        return -1
+    return {"name": name, "key": taxon_key, "children": tree_children}
 
-def display_tree(taxon_key, name, current_rank="kingdom", level=0):
-    exp_label = f"{name} ({current_rank})"
-    with st.expander(exp_label, expanded=level==0):
-        children = get_children(taxon_key)
-        if not children:
-            st.write("— Leaf node")
-            return
+def display_tree_node(node, level=0):
+    indent = " " * (level * 4)
+    st.markdown(f"{indent}- {node['name']} (key: {node['key']})")
+    for child in node.get("children", []):
+        display_tree_node(child, level + 1)
 
-        curr_idx = get_rank_index(current_rank)
-        for child in children:
-            child_rank = child.get("rank", "").lower() or "unranked"
-            child_name = child.get("canonicalName") or child.get("scientificName") or "Unknown"
-            child_key = child["key"]
+st.title("🐾 GBIF Hierarchical Tree of Life")
 
-            child_idx = get_rank_index(child_rank)
-            # Only recurse if child rank is lower (higher index) in hierarchy or unranked (-1)
-            if child_idx == -1 or child_idx > curr_idx:
-                display_tree(child_key, child_name, current_rank=child_rank, level=level+1)
-            else:
-                # Same or higher rank — treat as leaf here, just print
-                st.markdown(f"{'  ' * (level + 1)}- {child_name} ({child_rank})")
+root_taxa = ["Animalia", "Plantae", "Fungi"]
 
-st.title("🌳 Hierarchical GBIF Tree of Life Navigator")
-
-roots = []
-for kingdom in ROOT_KINGDOMS:
-    key = get_taxon_key(kingdom)
-    if key:
-        roots.append({"key": key, "name": kingdom})
-
-for root in roots:
-    display_tree(root["key"], root["name"], current_rank="kingdom")
+for root_name in root_taxa:
+    # Get taxon key
+    r = requests.get(f"{BASE_URL}/species/match", params={"name": root_name, "rank": "KINGDOM"})
+    if r.ok:
+        root_key = r.json().get("usageKey")
+        if root_key:
+            st.header(f"{root_name} (key: {root_key})")
+            tree = build_tree(root_key, root_name)
+            display_tree_node(tree)
+        else:
+            st.error(f"Could not find taxon key for {root_name}")
+    else:
+        st.error(f"API error getting taxon key for {root_name}")
