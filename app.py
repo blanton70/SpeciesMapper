@@ -52,20 +52,33 @@ def get_next_rank(current_rank):
     except ValueError:
         return None
 
-def display_tree(taxon_key, name, current_rank="kingdom", level=0):
-    next_rank = get_next_rank(current_rank)
-    exp_label = f"{name} ({current_rank})"
-    with st.expander(exp_label, expanded=level==0):  # expand only top level by default
-        if not next_rank:
-            st.write("— Reached leaf node")
-            return
-        children = get_children(taxon_key)
-        filtered_children = [c for c in children if c.get("rank", "").lower() == next_rank]
-        for child in filtered_children:
-            child_key = child["key"]
-            child_name = child.get("canonicalName") or child.get("scientificName")
-            display_tree(child_key, child_name, current_rank=next_rank, level=level + 1)
+def get_rank_index(rank):
+    try:
+        return RANK_HIERARCHY.index(rank.lower())
+    except ValueError:
+        return -1
 
+def display_tree(taxon_key, name, current_rank="kingdom", level=0):
+    exp_label = f"{name} ({current_rank})"
+    with st.expander(exp_label, expanded=level==0):
+        children = get_children(taxon_key)
+        if not children:
+            st.write("— Leaf node")
+            return
+
+        curr_idx = get_rank_index(current_rank)
+        for child in children:
+            child_rank = child.get("rank", "").lower() or "unranked"
+            child_name = child.get("canonicalName") or child.get("scientificName") or "Unknown"
+            child_key = child["key"]
+
+            child_idx = get_rank_index(child_rank)
+            # Only recurse if child rank is lower (higher index) in hierarchy or unranked (-1)
+            if child_idx == -1 or child_idx > curr_idx:
+                display_tree(child_key, child_name, current_rank=child_rank, level=level+1)
+            else:
+                # Same or higher rank — treat as leaf here, just print
+                st.markdown(f"{'  ' * (level + 1)}- {child_name} ({child_rank})")
 
 st.title("🌳 Hierarchical GBIF Tree of Life Navigator")
 
