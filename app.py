@@ -1,86 +1,125 @@
-import requests
 import streamlit as st
+import requests
+import pandas as pd
+import plotly.express as px
+import h3
+from collections import defaultdict
+import streamlit as st
+import requests
 
-BASE_URL = "https://api.gbif.org/v1"
+st.set_page_config(layout="wide")
+st.title("🌳 Tree of Life — Taxonomic Browser")
 
-st.set_page_config(page_title="GBIF Dynamic Taxonomy Tree", layout="wide")
-st.title("🌳 GBIF Dynamic Taxonomic Tree (Lazy-Loaded)")
+RANK_ORDER = ["KINGDOM", "PHYLUM", "CLASS", "ORDER", "FAMILY"]
+ROOT_TAXA = ["Animalia", "Plantae", "Fungi", "Bacteria", "Protozoa", "Chromista"]
 
-# Ranks ordered by hierarchy
-RANK_ORDER = ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
+# Global UI tweaks
+st.markdown("""
+    <style>
+    .stCheckbox > div {
+        padding-top: 0.1rem;
+        padding-bottom: 0.1rem;
+    }
+    .stMarkdown p {
+        margin-bottom: 0.1rem;
+    }
+    label, input, div {
+        font-size: 13px !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# Caching API calls for performance
-@st.cache_data(show_spinner=False)
-def get_taxon_key(name, rank="KINGDOM"):
-    url = f"{BASE_URL}/species/match"
-    r = requests.get(url, params={"name": name, "rank": rank})
-    if r.ok:
-        return r.json().get("usageKey")
-    return None
 
-@st.cache_data(show_spinner=False)
-def get_children(taxon_key, limit=100, offset=0):
-    url = f"{BASE_URL}/species/{taxon_key}/children"
-    r = requests.get(url, params={"limit": limit, "offset": offset})
-    if r.ok:
-        return r.json().get("results", [])
-    return []
-
-@st.cache_data(show_spinner=False)
-def get_all_children(taxon_key):
-    """Retrieve all children with pagination."""
-    all_children = []
-    limit = 100
-    offset = 0
-    while True:
-        children = get_children(taxon_key, limit, offset)
-        if not children:
-            break
-        all_children.extend(children)
-        if len(children) < limit:
-            break
-        offset += limit
-    return all_children
-
-def next_rank(current_rank):
-    """Get the next lower rank in the GBIF hierarchy."""
+# -------------------------------
+# Utilities
+# -------------------------------
+def get_next_rank(rank):
     try:
-        idx = RANK_ORDER.index(current_rank.lower())
+        idx = RANK_ORDER.index(rank)
         return RANK_ORDER[idx + 1] if idx + 1 < len(RANK_ORDER) else None
     except ValueError:
         return None
 
-def display_node(name, key, rank, level=0):
-    """Recursively display a node and lazy-load its children."""
-    indent = " " * (level * 4)
-    with st.expander(f"{indent}{name} (rank: {rank})", expanded=False):
-        nrank = next_rank(rank)
-        if not nrank:
-            st.write(f"{indent}Reached terminal rank.")
-            return
+@st.cache_data(show_spinner=False)
+def match_taxon(name):
+    res = requests.get(f"https://api.gbif.org/v1/species/match?name={name}")
+    data = res.json()
+    if data.get("usageKey"):
+        return fetch_taxon(data["usageKey"])
+    return None
 
-        children = get_all_children(key)
-        filtered = [c for c in children if c.get("rank", "").lower() == nrank]
+@st.cache_data(show_spinner=False)
+def fetch_taxon(key):
+    res = requests.get(f"https://api.gbif.org/v1/species/{key}")
+    data = res.json()
+    return {
+        "key": data["key"],
+        "scientificName": data["scientificName"],
+        "commonName": data.get("vernacularName", None),
+        "rank": data["rank"]
+    }
 
-        # Optionally sort alphabetically
-        filtered.sort(key=lambda x: x.get("canonicalName", ""))
+@st.cache_data(show_spinner=False)
+def fetch_children(taxon_key):
+    res = requests.get(f"https://api.gbif.org/v1/species/{taxon_key}/children?limit=1000")
+    return res.json().get("results", [])
 
-        if not filtered:
-            st.info(f"No children of rank '{nrank}' found.")
-            return
+# -------------------------------
+# Recursive Tree Renderer
+# -------------------------------
+def render_node(taxon, depth=0):
+    indent = "&nbsp;" * (depth * 4)
+    label = f"{taxon['scientificName']}"
+    if taxon["commonName"]:
+        label += f" ({taxon['commonName']})"
+    next_rank = get_next_rank(taxon["rank"])
 
-        for child in filtered:
-            child_name = child.get("canonicalName") or child.get("scientificName") or "Unknown"
-            child_key = child.get("key")
-            child_rank = child.get("rank") or nrank
-            display_node(child_name, child_key, child_rank, level + 1)
+    key = f"{taxon['key']}_{depth}"
 
-# Start with root taxa
-root_taxa = ["Animalia", "Plantae", "Fungi"]
-
-for root in root_taxa:
-    key = get_taxon_key(root)
-    if key:
-        display_node(root, key, "kingdom")
+    # Checkbox for FAMILY level
+    if taxon["rank"] == "FAMILY":
+        checked = st.checkbox(f"{indent}{label}", key=key)
+        if checked:
+            st.session_state["selected_families"].add(taxon["key"])
     else:
-        st.error(f"Could not fetch key for {root}")
+        with st.container():
+            col1, col2 = st.columns([0.05, 0.95])
+            with col1:
+                expand = st.toggle("", key=f"toggle_{key}", label_visibility="collapsed")
+            with col2:
+                st.markdown(f"{indent}**{label}**", unsafe_allow_html=True)
+
+        if expand and next_rank:
+            children = fetch_children(taxon["key"])
+            for child in children:
+                if child.get("rank") == next_rank:
+                    child_taxon = fetch_taxon(child["key"])
+                    render_node(child_taxon, depth + 1)
+
+st.markdown("---")
+if st.button("🗺️ Map Selected Families"):
+    st.session_state["plot_trigger"] = True
+
+# -------------------------------
+# Session State Init
+# -------------------------------
+if "selected_families" not in st.session_state:
+    st.session_state["selected_families"] = set()
+
+# -------------------------------
+# Sidebar Layout
+# -------------------------------
+with st.sidebar:
+    st.header("🌿 Taxonomic Tree")
+    for root in ROOT_TAXA:
+        root_taxon = match_taxon(root)
+        if root_taxon:
+            render_node(root_taxon, depth=0)
+
+    st.markdown("---")
+    if st.session_state["selected_families"]:
+        st.markdown("### ✅ Selected Families")
+        for key in st.session_state["selected_families"]:
+            st.markdown(f"- Taxon Key: `{key}`")
+    else:
+        st.info("No families selected yet.")
