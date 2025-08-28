@@ -1,12 +1,43 @@
-from flask import Flask, request, send_file
+import streamlit as st
+import requests
+import pandas as pd
+import json
+import time
 import folium
 from folium.plugins import HeatMap
-import pandas as pd
-import requests
-import time
+from streamlit_folium import st_folium
 
-app = Flask(__name__)
 
+# -------- Load tree -------- #
+@st.cache_data
+def load_tree():
+    with open("tree.json") as f:
+        return json.load(f)
+
+tree = load_tree()
+
+# -------- UI: Recursive Tree Menu -------- #
+def show_tree(tree_node, path=[]):
+    for key in tree_node:
+        with st.expander(" > ".join(path + [key])):
+            if tree_node[key]:
+                show_tree(tree_node[key], path + [key])
+            else:
+                if st.button(f"Select {key}", key=">".join(path + [key])):
+                    st.session_state["selected_family"] = key
+
+
+st.title("🌍 GBIF Species Richness Mapper")
+st.subheader("Step 1: Select a Family from the Tree")
+
+if "selected_family" not in st.session_state:
+    st.session_state["selected_family"] = None
+
+show_tree(tree)
+
+selected_family = st.session_state["selected_family"]
+
+# -------- GBIF Occurrence Query -------- #
 def get_taxon_key(family):
     url = f"https://api.gbif.org/v1/species/match?rank=FAMILY&name={family}"
     r = requests.get(url)
@@ -50,21 +81,23 @@ def get_occurrences(taxon_key):
             time.sleep(1)
     return pd.DataFrame(all_data)
 
-@app.route("/query")
-def query():
-    family = request.args.get("family")
-    taxon_key = get_taxon_key(family)
-    df = get_occurrences(taxon_key)
-    df["lat_bin"] = (df["lat"] // 1) * 1
-    df["lon_bin"] = (df["lon"] // 1) * 1
-    richness = df.groupby(["lat_bin", "lon_bin"])["species"].nunique().reset_index()
-    richness.columns = ["lat", "lon", "richness"]
+# -------- Map Rendering -------- #
+if selected_family:
+    st.subheader(f"Step 2: Querying GBIF for `{selected_family}`")
+    with st.spinner("Fetching data..."):
+        taxon_key = get_taxon_key(selected_family)
+        if taxon_key:
+            df = get_occurrences(taxon_key)
+            df["lat_bin"] = (df["lat"] // 1) * 1
+            df["lon_bin"] = (df["lon"] // 1) * 1
+            richness = df.groupby(["lat_bin", "lon_bin"])["species"].nunique().reset_index()
+            richness.columns = ["lat", "lon", "richness"]
 
-    m = folium.Map(location=[0, 0], zoom_start=2)
-    heat_data = [[row["lat"], row["lon"], row["richness"]] for _, row in richness.iterrows()]
-    HeatMap(heat_data, radius=8).add_to(m)
-    m.save("templates/map.html")
-    return send_file("templates/map.html")
+            m = folium.Map(location=[0, 0], zoom_start=2, tiles="cartodbpositron")
+            heat_data = [[row["lat"], row["lon"], row["richness"]] for _, row in richness.iterrows()]
+            HeatMap(heat_data, radius=8).add_to(m)
 
-if __name__ == "__main__":
-    app.run(debug=True)
+            st.subheader("🌐 Species Richness Map")
+            st_folium(m, width=700, height=500)
+        else:
+            st.error(f"Could not find taxon key for '{selected_family}'")
