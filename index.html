@@ -1,0 +1,42 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Tree of Life Selector</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jstree/dist/themes/default/style.min.css" />
+</head>
+<body>
+  <h2>Select a Family</h2>
+  <div id="tree"></div>
+  <button onclick="submitSelection()">Search GBIF</button>
+
+  <script src="https://cdn.jsdelivr.net/npm/jquery"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jstree"></script>
+  <script>
+    fetch("tree.json")
+      .then(response => response.json())
+      .then(data => {
+        $('#tree').jstree({
+          'core': {
+            'data': convertToJsTree(data)
+          }
+        });
+      });
+
+    function convertToJsTree(obj) {
+      return Object.keys(obj).map(key => ({
+        text: key,
+        children: convertToJsTree(obj[key])
+      }));
+    }
+
+    function submitSelection() {
+      const selected = $('#tree').jstree('get_selected', true);
+      const family = selected.length > 0 ? selected[0].text : null;
+      if (family) {
+        window.location.href = `/query?family=${family}`;
+      }
+    }
+  </script>
+</body>
+</html>
